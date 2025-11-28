@@ -303,8 +303,12 @@ with tab1:
     with colA:
         placeholder = st.empty()
         # Read values (simulated or Bluetooth)
+        readings = None
         if connect_mode == "Simulated (demo)":
-            readings = SIM_WATCH.read()
+            try:
+                readings = SIM_WATCH.read()
+            except Exception:
+                readings = None
         else:
             # try to read from BLE; synchronous calls to async function
             readings = None
@@ -315,28 +319,85 @@ with tab1:
                 ble_res = loop.run_until_complete(read_from_ble(address=None, characteristic_uuid=None))
                 readings = ble_res if ble_res else SIM_WATCH.read()
             except Exception:
-                readings = SIM_WATCH.read()
+                # fallback to simulated if BLE fails
+                try:
+                    readings = SIM_WATCH.read()
+                except Exception:
+                    readings = None
+
+        # Ensure readings is a dict with numeric defaults to avoid TypeErrors in st.metric
+        def safe_get(d, key, default=None):
+            try:
+                if not isinstance(d, dict):
+                    return default
+                val = d.get(key, default)
+                # coerce to int/float or return default
+                if val is None:
+                    return default
+                if isinstance(val, (int, float)):
+                    return val
+                # try numeric conversion
+                try:
+                    return int(val)
+                except Exception:
+                    try:
+                        return float(val)
+                    except Exception:
+                        return default
+            except Exception:
+                return default
+
+        # Provide safe defaults if everything fails
+        default_readings = {"systolic": None, "diastolic": None, "hr": None, "spo2": None, "steps": None, "skin_temp": None}
+        if readings is None:
+            readings = default_readings
+        else:
+            # make sure all keys exist
+            for k in default_readings:
+                readings.setdefault(k, default_readings[k])
 
         # display cards
         with placeholder.container():
             st.markdown('<div class="card">', unsafe_allow_html=True)
             rcol1, rcol2, rcol3 = st.columns(3)
-            rcol1.metric("Systolic BP (mmHg)", readings["systolic"], NORMALS["systolic_bp"], delta=None)
-            rcol2.metric("Diastolic BP (mmHg)", readings["diastolic"], NORMALS["diastolic_bp"], delta=None)
-            rcol3.metric("Resting HR (bpm)", readings["hr"], NORMALS["resting_hr"], delta=None)
-            rcol1.metric("SpO₂ (%)", readings["spo2"], NORMALS["spo2"], delta=None)
-            rcol2.metric("Skin Temp (°C)", readings["skin_temp"], "~36.6")
-            rcol3.metric("Steps (today)", readings["steps"], "—")
+
+            systolic_val = safe_get(readings, "systolic", "—")
+            diastolic_val = safe_get(readings, "diastolic", "—")
+            hr_val = safe_get(readings, "hr", "—")
+            spo2_val = safe_get(readings, "spo2", "—")
+            skin_temp_val = readings.get("skin_temp", "—")
+            steps_val = readings.get("steps", "—")
+
+            # st.metric expects a string or numeric value; ensure we pass a valid type (or string placeholder)
+            try:
+                rcol1.metric("Systolic BP (mmHg)", systolic_val if systolic_val is not None else "—", delta=None)
+                rcol2.metric("Diastolic BP (mmHg)", diastolic_val if diastolic_val is not None else "—", delta=None)
+                rcol3.metric("Resting HR (bpm)", hr_val if hr_val is not None else "—", delta=None)
+                rcol1.metric("SpO₂ (%)", spo2_val if spo2_val is not None else "—", delta=None)
+                rcol2.metric("Skin Temp (°C)", skin_temp_val if skin_temp_val is not None else "—", "~36.6")
+                rcol3.metric("Steps (today)", steps_val if steps_val is not None else "—", "—")
+            except TypeError as te:
+                # Fallback display if st.metric raises a TypeError for unexpected types
+                rcol1.write(f"Systolic BP: {systolic_val or '—'}")
+                rcol2.write(f"Diastolic BP: {diastolic_val or '—'}")
+                rcol3.write(f"Resting HR: {hr_val or '—'}")
+                rcol1.write(f"SpO₂: {spo2_val or '—'}")
+                rcol2.write(f"Skin Temp: {skin_temp_val or '—'}")
+                rcol3.write(f"Steps: {steps_val or '—'}")
+
             st.markdown('</div>', unsafe_allow_html=True)
 
     with colB:
         st.subheader("Comparison: average person")
         comp_df = pd.DataFrame({
             "Measure": ["Systolic (mmHg)", "Diastolic (mmHg)", "Resting HR (bpm)", "SpO2 (%)"],
-            "You": [readings["systolic"], readings["diastolic"], readings["hr"], readings["spo2"]],
+            "You": [safe_get(readings, "systolic", "—"), safe_get(readings, "diastolic", "—"), safe_get(readings, "hr", "—"), safe_get(readings, "spo2", "—")],
             "Average": [NORMALS["systolic_bp"], NORMALS["diastolic_bp"], NORMALS["resting_hr"], NORMALS["spo2"]],
         })
         st.table(comp_df.set_index("Measure"))
+
+# store the latest readings in session state for use in risk tab
+st.session_state["latest_readings"] = readings
 
 # store the latest readings in session state for use in risk tab
 st.session_state["latest_readings"] = readings
