@@ -1,17 +1,3 @@
-# streamlit_hypertension_watch_app.py
-# Single-file Streamlit app that:
-# - connects (or simulates) a smartwatch via Bluetooth (Bleak) to read vitals
-# - displays live readings alongside normal/average values for comparison
-# - asks symptom questions
-# - trains/uses a simple ML model (RandomForest) on synthetic data to predict future hypertension risk
-# - shows a horizontal risk bar that changes color from green->yellow->red by risk percentage
-# - provides personalized lifestyle guidance based on risk
-# - includes a placeholder function to look up recommended doctors using Google Places API (requires user API key)
-
-# Requirements:
-# pip install streamlit scikit-learn joblib pandas numpy bleak
-# Note: Bleak works on Windows/Linux/macOS; run Streamlit on the same machine that has Bluetooth access.
-
 import streamlit as st
 import pandas as pd
 import numpy as np
