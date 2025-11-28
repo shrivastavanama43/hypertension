@@ -99,16 +99,43 @@ def generate_synthetic_dataset(n=3000, random_state=42):
 
 
 def train_and_save_model(path=MODEL_PATH, force_retrain=False):
+    """Train a demo RandomForest pipeline on synthetic data and save it to `path`.
+
+    This function is robust to the single-class problem (when the generated labels
+    accidentally contain only one class) and uses stratified splitting to keep
+    both classes in train/test when possible.
+    """
+    # If model exists and retrain not requested, load it
     if os.path.exists(path) and not force_retrain:
         try:
             model = joblib.load(path)
             return model
         except Exception:
+            # fall through and retrain
             pass
+
     df = generate_synthetic_dataset()
     X = df.drop(columns=["future_htn"])
     y = df["future_htn"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # If y has only one class, tweak generation (or fall back to a small perturbation)
+    if y.nunique() == 1:
+        # force some positives by flipping a small fraction
+        n = len(y)
+        flip_n = max(2, int(0.02 * n))
+        y.iloc[:flip_n] = 1 - y.iloc[:flip_n]
+
+    # Use stratify when possible to keep class balance in splits
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+    except ValueError:
+        # fallback if stratify fails (e.g. extremely imbalanced)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+
     numeric_cols = ["age", "bmi", "resting_hr", "systolic", "diastolic", "sleep_hours"]
     cat_cols = ["activity_level", "stress_level", "smoker", "alcohol", "family_history"]
 
@@ -118,12 +145,72 @@ def train_and_save_model(path=MODEL_PATH, force_retrain=False):
     ])
 
     pipeline.fit(X_train[numeric_cols + cat_cols], y_train)
-    y_prob = pipeline.predict_proba(X_test[numeric_cols + cat_cols])[:,1]
-    auc = roc_auc_score(y_test, y_prob)
+
+    # compute predicted probabilities robustly even when only one class is present
+    proba = pipeline.predict_proba(X_test[numeric_cols + cat_cols])
+    rf = pipeline.named_steps.get("rf")
+    classes = None
+    if rf is not None and hasattr(rf, "classes_"):
+        classes = list(rf.classes_)
+
+    if classes is None:
+        # As a fallback, try to infer from proba shape
+        if proba.ndim == 1:
+            y_prob = proba
+        elif proba.shape[1] == 1:
+            y_prob = proba[:, 0]
+        else:
+            y_prob = proba[:, 1]
+    else:
+        if len(classes) == 1:
+            # model learned only one class; set probabilities accordingly
+            if classes[0] == 1:
+                y_prob = np.ones(len(X_test))
+            else:
+                y_prob = np.zeros(len(X_test))
+        else:
+            # find index of positive class (label 1)
+            try:
+                idx_pos = classes.index(1)
+            except ValueError:
+                # if label 1 not present, pick the last column
+                idx_pos = -1
+            y_prob = proba[:, idx_pos]
+
+    try:
+        auc = roc_auc_score(y_test, y_prob)
+    except Exception:
+        auc = None
+
+    # persist the trained pipeline
     joblib.dump(pipeline, path)
     return pipeline
 
-model = train_and_save_model()
+# Load model (do not retrain automatically on every import in production)
+try:
+    if os.path.exists(MODEL_PATH):
+        model = joblib.load(MODEL_PATH)
+    else:
+        # train a demo model if none exists
+        model = train_and_save_model()
+except Exception as e:
+    # if something goes wrong, create a minimal fallback model to avoid breaking UI
+    st.warning(f"Model load/train failed (using fallback). Details: {str(e)}")
+    # create a very small default pipeline that predicts zero probability
+    fallback_rf = RandomForestClassifier(n_estimators=10, random_state=42)
+    # train on tiny synthetic set to ensure it supports predict_proba
+    df_small = generate_synthetic_dataset(n=50)
+    X_small = df_small.drop(columns=["future_htn"])
+    y_small = df_small["future_htn"]
+    numeric_cols = ["age", "bmi", "resting_hr", "systolic", "diastolic", "sleep_hours"]
+    cat_cols = ["activity_level", "stress_level", "smoker", "alcohol", "family_history"]
+    pipe_small = Pipeline([("scaler", StandardScaler()), ("rf", fallback_rf)])
+    try:
+        pipe_small.fit(X_small[numeric_cols + cat_cols], y_small)
+        model = pipe_small
+    except Exception:
+        model = None
+
 
 # ----------------------------- Bluetooth (simulated) reader -----------------------------
 
